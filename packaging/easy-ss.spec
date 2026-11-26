@@ -10,9 +10,13 @@ Source1:        io.github.easyss.EasySS.desktop
 Requires:       gtk4 >= 4.10
 Requires:       xdg-desktop-portal
 Requires:       xdg-desktop-portal-gnome
+Requires:       gstreamer1
+Requires:       gstreamer1-plugins-good
+Requires:       pipewire-gstreamer
 
 %description
 Capture a screen, window, or selected area and annotate, copy, or save it as PNG.
+Record a monitor or window as a WebM video.
 
 %install
 install -Dm755 "%{SOURCE0}" "%{buildroot}%{_bindir}/easy-ss"

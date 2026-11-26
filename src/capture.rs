@@ -4,7 +4,7 @@ use ashpd::WindowIdentifier;
 use ashpd::desktop::{ResponseError, screenshot::Screenshot};
 use gtk::{gdk_pixbuf::Pixbuf, gio, glib, prelude::*};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 async fn request(parent: Option<WindowIdentifier>) -> Result<Option<Screenshot>, ashpd::Error> {
@@ -76,45 +76,15 @@ pub async fn capture(
 /// The portal always saves into ~/Pictures. Move the file to the folder the
 /// user chose; on any failure it stays where the portal put it.
 fn relocate(path: &Path, storage: Storage) {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-    let dir = match storage {
-        Storage::Temporary => {
-            // The portal writes the file as the current user.
-            let Ok(uid) = fs::metadata(path).map(|m| m.uid()) else {
-                return;
-            };
-            let dir = glib::tmp_dir().join(format!("easy-ss-{uid}"));
-            let _ = fs::DirBuilder::new().mode(0o700).create(&dir);
-            // Refuse a folder another user created in the shared /tmp.
-            let Ok(meta) = fs::symlink_metadata(&dir) else {
-                return;
-            };
-            if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
-                return;
-            }
-            dir
-        }
-        Storage::Screenshots => {
-            let Some(pictures) = glib::user_special_dir(glib::UserDirectory::Pictures) else {
-                return;
-            };
-            let dir = pictures.join("Screenshots");
-            if fs::create_dir_all(&dir).is_err() {
-                return;
-            }
-            dir
-        }
+    use std::os::unix::fs::MetadataExt;
+    // The portal writes the file as the current user.
+    let Ok(uid) = fs::metadata(path).map(|m| m.uid()) else {
+        return;
     };
-    let stamp = glib::DateTime::now_local()
-        .and_then(|now| now.format("%Y-%m-%d %H-%M-%S"))
-        .map_or_else(|_| "capture".into(), |s| s.to_string());
-    let Some(target) = (1..1000)
-        .map(|n| match n {
-            1 => dir.join(format!("Screenshot From {stamp}.png")),
-            n => dir.join(format!("Screenshot From {stamp} ({n}).png")),
-        })
-        .find(|target| !target.exists())
-    else {
+    let Some(dir) = storage_dir(storage, uid, glib::UserDirectory::Pictures, "Screenshots") else {
+        return;
+    };
+    let Some(target) = unique_path(&dir, "Screenshot", "png") else {
         return;
     };
     if fs::rename(path, &target).is_ok()
@@ -123,4 +93,45 @@ fn relocate(path: &Path, storage: Storage) {
         return;
     }
     let _ = fs::remove_file(&target);
+}
+
+/// Folder for new files of user `uid`: a private folder under /tmp, or
+/// `folder` inside the user directory `kept` for permanent storage.
+pub fn storage_dir(
+    storage: Storage,
+    uid: u32,
+    kept: glib::UserDirectory,
+    folder: &str,
+) -> Option<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    match storage {
+        Storage::Temporary => {
+            let dir = glib::tmp_dir().join(format!("easy-ss-{uid}"));
+            let _ = fs::DirBuilder::new().mode(0o700).create(&dir);
+            // Refuse a folder another user created in the shared /tmp.
+            let meta = fs::symlink_metadata(&dir).ok()?;
+            if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
+                return None;
+            }
+            Some(dir)
+        }
+        Storage::Screenshots => {
+            let dir = glib::user_special_dir(kept)?.join(folder);
+            fs::create_dir_all(&dir).ok()?;
+            Some(dir)
+        }
+    }
+}
+
+/// A free name like `dir/Screenshot From 2026-01-31 12-00-00.png`.
+pub fn unique_path(dir: &Path, prefix: &str, extension: &str) -> Option<PathBuf> {
+    let stamp = glib::DateTime::now_local()
+        .and_then(|now| now.format("%Y-%m-%d %H-%M-%S"))
+        .map_or_else(|_| "capture".into(), |s| s.to_string());
+    (1..1000)
+        .map(|n| match n {
+            1 => dir.join(format!("{prefix} From {stamp}.{extension}")),
+            n => dir.join(format!("{prefix} From {stamp} ({n}).{extension}")),
+        })
+        .find(|target| !target.exists())
 }

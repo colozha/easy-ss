@@ -1,6 +1,7 @@
 mod capture;
 mod document;
 mod print_screen;
+mod record;
 mod settings;
 use print_screen::PrintScreen;
 use settings::{Labels, Language, Preferences, Storage, Theme};
@@ -45,6 +46,10 @@ struct Editor {
     busy: Cell<bool>,
     close_allowed: Cell<bool>,
     copy_on_focus: Cell<bool>,
+    /// Encoder of the running screen recording.
+    recording: RefCell<Option<gio::Subprocess>>,
+    record_button: gtk::Button,
+    stop_button: gtk::Button,
 }
 
 fn add_action(e: &Rc<Editor>, name: &str, run: impl Fn(Rc<Editor>) + 'static) {
@@ -113,8 +118,8 @@ impl Editor {
         );
         labels.tip(
             &storage,
-            "Berkas di /tmp terhapus saat komputer dimulai ulang",
-            "Files in /tmp are removed when the computer restarts",
+            "Berkas di /tmp terhapus saat komputer dimulai ulang. Video permanen disimpan di Video/Screencasts.",
+            "Files in /tmp are removed when the computer restarts. Permanent videos go to Videos/Screencasts.",
         );
         for (i, (id, en, control)) in [
             ("Bahasa", "Language", &language),
@@ -184,6 +189,33 @@ impl Editor {
             } else {
                 header.pack_end(&button)
             }
+        }
+        let record_button = gtk::Button::new();
+        record_button.set_child(Some(&labels.button(
+            "media-record-symbolic",
+            "Rekam",
+            "Record",
+        )));
+        labels.tip(
+            &record_button,
+            "Rekam video layar (Ctrl+R)",
+            "Record screen video (Ctrl+R)",
+        );
+        let stop_button = gtk::Button::new();
+        stop_button.set_child(Some(&labels.button(
+            "media-playback-stop-symbolic",
+            "Berhenti",
+            "Stop",
+        )));
+        labels.tip(
+            &stop_button,
+            "Hentikan rekaman (Ctrl+R)",
+            "Stop recording (Ctrl+R)",
+        );
+        stop_button.add_css_class("destructive-action");
+        for button in [&record_button, &stop_button] {
+            button.set_action_name(Some("win.record"));
+            header.pack_start(button);
         }
         let mode = labels.dropdown(
             &["Persegi panjang", "Bentuk bebas", "Layar penuh"],
@@ -266,8 +298,8 @@ impl Editor {
         icon.add_css_class("dim-label");
         empty.append(&icon);
         let hint = labels.label(
-            "Klik Baru untuk mengambil screenshot.",
-            "Click New to take a screenshot.",
+            "Klik Baru untuk mengambil screenshot atau Rekam untuk merekam video.",
+            "Click New to take a screenshot or Record to record a video.",
         );
         empty.append(&hint);
         overlay.add_overlay(&empty);
@@ -303,6 +335,9 @@ impl Editor {
             busy: Cell::new(false),
             close_allowed: Cell::new(false),
             copy_on_focus: Cell::new(false),
+            recording: Default::default(),
+            record_button,
+            stop_button,
         });
         e.labels.apply(preferences.language);
         let weak = Rc::downgrade(&e);
@@ -409,6 +444,7 @@ impl Editor {
             });
         }
         add_action(&e, "new", |e| e.start(false));
+        add_action(&e, "record", |e| e.record());
         add_action(&e, "copy", |e| e.copy());
         add_action(&e, "save", |e| e.save());
         add_action(&e, "delete", |e| {
@@ -424,6 +460,7 @@ impl Editor {
         add_action(&e, "redo", |e| e.history(true));
         for (action, accel) in [
             ("new", "<Control>n"),
+            ("record", "<Control>r"),
             ("delete", "Delete"),
             ("copy", "<Control>c"),
             ("save", "<Control>s"),
@@ -452,6 +489,10 @@ impl Editor {
             }
             if e.selecting() {
                 e.end_selection();
+                return glib::Propagation::Stop;
+            }
+            if let Some(process) = e.recording.borrow().as_ref() {
+                record::Recording::stop(process);
                 return glib::Propagation::Stop;
             }
             if e.busy.get() {
@@ -484,8 +525,10 @@ impl Editor {
     fn refresh(&self) {
         let doc = self.doc.borrow();
         let busy = self.busy.get();
+        let recording = self.recording.borrow().is_some();
         for (name, enabled) in [
             ("new", true),
+            ("record", true),
             ("delete", self.selected.get().is_some()),
             ("save", doc.is_some()),
             ("copy", doc.is_some()),
@@ -497,8 +540,10 @@ impl Editor {
                 .unwrap()
                 .downcast::<gio::SimpleAction>()
                 .unwrap()
-                .set_enabled(enabled && !busy);
+                .set_enabled(enabled && (!busy || name == "record" && recording));
         }
+        self.record_button.set_visible(!recording);
+        self.stop_button.set_visible(recording);
         self.delete.set_visible(self.selected.get().is_some());
         self.settings_button.set_sensitive(!busy);
         self.tools.set_visible(doc.is_some());
@@ -619,6 +664,62 @@ impl Editor {
                 Err(err) => self.error(
                     "Gagal mengambil gambar. Klik Baru untuk mencoba lagi.",
                     "Capture failed. Click New to try again.",
+                    err,
+                ),
+            }
+            self.set_busy(false);
+            self.window.present();
+        });
+    }
+    /// Starts a screen recording, or stops the running one.
+    fn record(self: Rc<Self>) {
+        if let Some(process) = self.recording.borrow().as_ref() {
+            record::Recording::stop(process);
+            return;
+        }
+        if self.busy.get() {
+            return;
+        }
+        self.cancel_drag();
+        self.set_busy(true);
+        glib::spawn_future_local(async move {
+            let seconds = [0, 3, 5, 10][self.delay.selected() as usize];
+            let delay = Duration::from_millis(seconds * 1000 + 180);
+            let preferences = self.preferences.get();
+            let result = record::start(
+                &self.window,
+                delay,
+                preferences.language,
+                preferences.storage,
+            )
+            .await;
+            match result {
+                Ok(Some(recording)) => {
+                    self.recording.replace(Some(recording.process.clone()));
+                    self.note(
+                        "Merekam layar. Klik Berhenti (Ctrl+R) untuk menyelesaikan.",
+                        "Recording the screen. Click Stop (Ctrl+R) to finish.",
+                    );
+                    self.refresh();
+                    let result = recording.wait(preferences.language).await;
+                    self.recording.take();
+                    match result {
+                        Ok(path) => {
+                            let path = path.display();
+                            self.note(
+                                &format!("Video disimpan di {path}"),
+                                &format!("Video saved to {path}"),
+                            );
+                        }
+                        Err(err) => {
+                            self.error("Gagal menyimpan video.", "Could not save the video.", err)
+                        }
+                    }
+                }
+                Ok(None) => self.note("Perekaman dibatalkan.", "Recording canceled."),
+                Err(err) => self.error(
+                    "Gagal memulai perekaman. Klik Rekam untuk mencoba lagi.",
+                    "Could not start recording. Click Record to try again.",
                     err,
                 ),
             }
