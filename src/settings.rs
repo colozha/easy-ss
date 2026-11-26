@@ -34,10 +34,30 @@ impl Theme {
     }
 }
 
+/// Where a capture file goes after the portal saves it into ~/Pictures.
+#[derive(Clone, Copy, Default, PartialEq)]
+pub enum Storage {
+    /// A private folder under /tmp, cleared on reboot.
+    #[default]
+    Temporary,
+    /// ~/Pictures/Screenshots, kept permanently.
+    Screenshots,
+}
+impl Storage {
+    pub const ALL: [Self; 2] = [Self::Temporary, Self::Screenshots];
+    fn name(self) -> &'static str {
+        match self {
+            Self::Temporary => "temporary",
+            Self::Screenshots => "screenshots",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct Preferences {
     pub language: Language,
     pub theme: Theme,
+    pub storage: Storage,
 }
 impl Preferences {
     pub fn load() -> Self {
@@ -55,7 +75,15 @@ impl Preferences {
             .into_iter()
             .find(|t| file.string("editor", "theme").as_deref() == Ok(t.name()))
             .unwrap_or_default();
-        Self { language, theme }
+        let storage = Storage::ALL
+            .into_iter()
+            .find(|s| file.string("capture", "storage").as_deref() == Ok(s.name()))
+            .unwrap_or_default();
+        Self {
+            language,
+            theme,
+            storage,
+        }
     }
     pub fn save(self) -> Result<(), Box<dyn std::error::Error>> {
         let dir = glib::user_config_dir().join("easy-ss");
@@ -63,6 +91,7 @@ impl Preferences {
         let file = glib::KeyFile::new();
         file.set_string("editor", "language", self.language.text("id", "en"));
         file.set_string("editor", "theme", self.theme.name());
+        file.set_string("capture", "storage", self.storage.name());
         file.save_to_file(dir.join("settings.ini"))?;
         Ok(())
     }

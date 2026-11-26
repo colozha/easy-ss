@@ -3,7 +3,7 @@ mod document;
 mod print_screen;
 mod settings;
 use print_screen::PrintScreen;
-use settings::{Labels, Language, Preferences, Theme};
+use settings::{Labels, Language, Preferences, Storage, Theme};
 
 use document::{Document, Point, Tool, Transform};
 use gtk::{
@@ -27,7 +27,6 @@ struct Editor {
     resize_corners: Cell<Option<(Point, Point)>>,
     delete: gtk::Button,
     message: RefCell<(String, String)>,
-    selection_hint: gtk::Label,
     tools: gtk::Box,
     area: gtk::DrawingArea,
     empty: gtk::Box,
@@ -35,7 +34,12 @@ struct Editor {
     mode: gtk::DropDown,
     delay: gtk::DropDown,
     doc: RefCell<Option<Document>>,
-    frozen: RefCell<Option<(Document, bool)>>,
+    /// Captured desktop and its pixels per logical pixel while selecting.
+    frozen: RefCell<Option<(Document, f64)>>,
+    /// One fullscreen selection window per monitor while selecting.
+    overlays: RefCell<Vec<gtk::Window>>,
+    /// Index of the overlay that owns the current `drag`.
+    active: Cell<usize>,
     tool: Cell<Tool>,
     drag: RefCell<Vec<Point>>,
     busy: Cell<bool>,
@@ -97,9 +101,28 @@ impl Editor {
                 .position(|&t| t == preferences.theme)
                 .unwrap() as u32,
         );
-        for (i, (id, en, control)) in [("Bahasa", "Language", &language), ("Tema", "Theme", &theme)]
-            .into_iter()
-            .enumerate()
+        let storage = labels.dropdown(
+            &["Sementara (/tmp)", "Gambar/Screenshots"],
+            &["Temporary (/tmp)", "Pictures/Screenshots"],
+        );
+        storage.set_selected(
+            Storage::ALL
+                .iter()
+                .position(|&s| s == preferences.storage)
+                .unwrap() as u32,
+        );
+        labels.tip(
+            &storage,
+            "Berkas di /tmp terhapus saat komputer dimulai ulang",
+            "Files in /tmp are removed when the computer restarts",
+        );
+        for (i, (id, en, control)) in [
+            ("Bahasa", "Language", &language),
+            ("Tema", "Theme", &theme),
+            ("Simpan tangkapan", "Keep captures", &storage),
+        ]
+        .into_iter()
+        .enumerate()
         {
             let label = labels.label(id, en);
             label.set_halign(gtk::Align::Start);
@@ -120,8 +143,8 @@ impl Editor {
         print_toggle.update_relation(&[gtk::accessible::Relation::LabelledBy(&[
             print_label.upcast_ref()
         ])]);
-        grid.attach(&print_label, 0, 2, 1, 1);
-        grid.attach(&print_toggle, 1, 2, 1, 1);
+        grid.attach(&print_label, 0, 3, 1, 1);
+        grid.attach(&print_toggle, 1, 3, 1, 1);
         pop.set_child(Some(&grid));
         settings_button.set_popover(Some(&pop));
         header.pack_end(&settings_button);
@@ -163,8 +186,8 @@ impl Editor {
             }
         }
         let mode = labels.dropdown(
-            &["Persegi panjang", "Bentuk bebas", "Jendela", "Layar penuh"],
-            &["Rectangle", "Freehand", "Window", "Full screen"],
+            &["Persegi panjang", "Bentuk bebas", "Layar penuh"],
+            &["Rectangle", "Freehand", "Full screen"],
         );
         labels.tip(&mode, "Mode tangkap", "Capture mode");
         header.pack_start(&mode);
@@ -248,13 +271,6 @@ impl Editor {
         );
         empty.append(&hint);
         overlay.add_overlay(&empty);
-        let selection_hint = gtk::Label::new(None);
-        selection_hint.set_halign(gtk::Align::Center);
-        selection_hint.set_valign(gtk::Align::Start);
-        selection_hint.set_margin_top(12);
-        selection_hint.set_can_target(false);
-        selection_hint.add_css_class("osd");
-        overlay.add_overlay(&selection_hint);
         root.append(&overlay);
         let status = gtk::Label::new(None);
         status.set_wrap(true);
@@ -272,7 +288,6 @@ impl Editor {
             selected: Cell::new(None),
             resize_corners: Cell::new(None),
             message: Default::default(),
-            selection_hint,
             tools,
             area,
             empty,
@@ -281,6 +296,8 @@ impl Editor {
             delay,
             doc: Default::default(),
             frozen: Default::default(),
+            overlays: Default::default(),
+            active: Cell::new(0),
             tool: Cell::new(Tool::Pen),
             drag: Default::default(),
             busy: Cell::new(false),
@@ -365,6 +382,19 @@ impl Editor {
                 e.save_preferences();
             }
         });
+        let weak = Rc::downgrade(&e);
+        storage.connect_selected_notify(move |d| {
+            if let Some(e) = weak.upgrade()
+                && !e.translating.get()
+                && let Some(&storage) = Storage::ALL.get(d.selected() as usize)
+            {
+                e.preferences.set(Preferences {
+                    storage,
+                    ..e.preferences.get()
+                });
+                e.save_preferences();
+            }
+        });
         for (b, t) in buttons {
             let weak = Rc::downgrade(&e);
             b.connect_toggled(move |b| {
@@ -441,21 +471,6 @@ impl Editor {
             });
             glib::Propagation::Stop
         });
-        let weak = Rc::downgrade(&e);
-        e.mode.connect_selected_notify(move |mode| {
-            if let Some(e) = weak.upgrade()
-                && !e.translating.get()
-            {
-                if mode.selected() == 2 {
-                    e.note(
-                        "Pilih Jendela di pemilih GNOME setelah menekan Baru.",
-                        "Choose Window in the GNOME picker after clicking New.",
-                    );
-                } else {
-                    e.note("", "");
-                }
-            }
-        });
         e.note("", "");
         e.refresh();
         e
@@ -464,7 +479,7 @@ impl Editor {
         self.doc.borrow().as_ref().is_some_and(Document::dirty)
     }
     fn selecting(&self) -> bool {
-        self.frozen.borrow().is_some()
+        !self.overlays.borrow().is_empty()
     }
     fn refresh(&self) {
         let doc = self.doc.borrow();
@@ -484,19 +499,17 @@ impl Editor {
                 .unwrap()
                 .set_enabled(enabled && !busy);
         }
-        let selecting = self.selecting();
         self.delete.set_visible(self.selected.get().is_some());
         self.settings_button.set_sensitive(!busy);
-        self.tools.set_visible(doc.is_some() && !selecting);
+        self.tools.set_visible(doc.is_some());
         self.tools.set_sensitive(!busy);
         self.mode.set_sensitive(!busy);
         self.delay.set_sensitive(!busy);
-        self.empty.set_visible(doc.is_none() && !selecting);
-        self.selection_hint.set_visible(selecting);
+        self.empty.set_visible(doc.is_none());
         self.area
-            .set_cursor_from_name(if !selecting && self.tool.get() == Tool::Select {
+            .set_cursor_from_name(if self.tool.get() == Tool::Select {
                 Some("default")
-            } else if selecting || doc.is_some() {
+            } else if doc.is_some() {
                 Some("crosshair")
             } else {
                 None
@@ -584,29 +597,22 @@ impl Editor {
                 )
             };
             let delay = Duration::from_millis(seconds * 1000 + 180);
+            let preferences = self.preferences.get();
             let result = capture::capture(
                 &self.window,
-                mode == 2,
                 delay,
-                self.preferences.get().language,
+                preferences.language,
+                preferences.storage,
             )
             .await;
             match result {
                 Ok(Some(doc)) if mode <= 1 => {
-                    self.frozen.replace(Some((doc, mode == 1)));
-                    self.window.fullscreen();
+                    // GNOME paints fullscreen windows opaque, so select on the
+                    // captured image rather than over the live desktop.
                     self.note("", "");
-                    self.selection_hint.set_text(if mode == 0 {
-                        self.text(
-                            "Seret untuk memilih area  ·  Esc untuk batal",
-                            "Drag to select an area  ·  Esc to cancel",
-                        )
-                    } else {
-                        self.text(
-                            "Gambar batas pilihan  ·  Esc untuk batal",
-                            "Draw a selection outline  ·  Esc to cancel",
-                        )
-                    });
+                    if self.open_overlays(doc, mode == 1) {
+                        return;
+                    }
                 }
                 Ok(Some(doc)) => self.accept(doc),
                 Ok(None) => self.note("Pengambilan dibatalkan.", "Capture canceled."),
@@ -616,16 +622,178 @@ impl Editor {
                     err,
                 ),
             }
-            self.set_busy(self.selecting());
+            self.set_busy(false);
             self.window.present();
         });
     }
-    fn end_selection(&self) {
+    /// Shows each monitor's part of the capture fullscreen to select on.
+    fn open_overlays(self: &Rc<Self>, doc: Document, freehand: bool) -> bool {
+        let hint = if freehand {
+            self.text(
+                "Gambar batas pilihan  ·  Esc untuk batal",
+                "Draw a selection outline  ·  Esc to cancel",
+            )
+        } else {
+            self.text(
+                "Seret untuk memilih area  ·  Esc untuk batal",
+                "Drag to select an area  ·  Esc to cancel",
+            )
+        };
+        let monitors = gtk::prelude::WidgetExt::display(&self.window).monitors();
+        let monitors: Vec<_> = (0..monitors.n_items())
+            .filter_map(|i| monitors.item(i)?.downcast::<gdk::Monitor>().ok())
+            .collect();
+        // The portal image spans the bounding box of all monitors at one scale.
+        let geometries: Vec<_> = monitors.iter().map(|m| m.geometry()).collect();
+        let left = geometries.iter().map(|g| g.x()).min().unwrap_or(0);
+        let top = geometries.iter().map(|g| g.y()).min().unwrap_or(0);
+        let right = geometries.iter().map(|g| g.x() + g.width()).max();
+        let Some(right) = right.filter(|&right| right > left) else {
+            return false;
+        };
+        let scale = doc.rect().w / (right - left) as f64;
+        self.frozen.replace(Some((doc, scale)));
+        let mut overlays = vec![];
+        for (index, (monitor, g)) in monitors.iter().zip(&geometries).enumerate() {
+            let offset = ((g.x() - left) as f64, (g.y() - top) as f64);
+            let window = gtk::Window::builder()
+                .decorated(false)
+                .title("Easy SS")
+                .build();
+            let area = gtk::DrawingArea::new();
+            area.set_cursor_from_name(Some("crosshair"));
+            let label = gtk::Label::new(Some(hint));
+            label.set_halign(gtk::Align::Center);
+            label.set_valign(gtk::Align::Start);
+            label.set_margin_top(12);
+            label.set_can_target(false);
+            label.add_css_class("osd");
+            let stack = gtk::Overlay::new();
+            stack.set_child(Some(&area));
+            stack.add_overlay(&label);
+            window.set_child(Some(&stack));
+            let weak = Rc::downgrade(self);
+            area.set_draw_func(move |_, c, w, h| {
+                if let Some(e) = weak.upgrade()
+                    && let Some((doc, scale)) = e.frozen.borrow().as_ref()
+                {
+                    let drag = e.drag.borrow();
+                    let points: &[Point] = if e.active.get() == index { &drag } else { &[] };
+                    let _ = c.save();
+                    c.scale(1. / scale, 1. / scale);
+                    c.translate(-offset.0 * scale, -offset.1 * scale);
+                    let _ = doc.paint(c);
+                    let _ = c.restore();
+                    c.rectangle(0., 0., w as f64, h as f64);
+                    let _ = Self::shade_outside(c, points, freehand, 0.4, 1.5);
+                }
+            });
+            let g = gtk::GestureDrag::new();
+            let weak = Rc::downgrade(self);
+            g.connect_drag_begin(move |g, x, y| {
+                if let Some(e) = weak.upgrade() {
+                    e.active.set(index);
+                    e.drag.replace(vec![(x, y)]);
+                    g.widget().inspect(|w| w.queue_draw());
+                }
+            });
+            let weak = Rc::downgrade(self);
+            g.connect_drag_update(move |g, dx, dy| {
+                if let Some(e) = weak.upgrade() {
+                    e.extend_overlay(g, dx, dy);
+                }
+            });
+            let weak = Rc::downgrade(self);
+            g.connect_drag_end(move |g, dx, dy| {
+                if let Some(e) = weak.upgrade() {
+                    e.extend_overlay(g, dx, dy);
+                    let points = e.drag.take();
+                    if !points.is_empty() {
+                        e.finish_selection(&points, offset, freehand);
+                    }
+                }
+            });
+            let weak = Rc::downgrade(self);
+            g.connect_cancel(move |g, _| {
+                if let Some(e) = weak.upgrade() {
+                    e.drag.borrow_mut().clear();
+                    g.widget().inspect(|w| w.queue_draw());
+                }
+            });
+            area.add_controller(g);
+            let key = gtk::EventControllerKey::new();
+            let weak = Rc::downgrade(self);
+            key.connect_key_pressed(move |_, k, _, _| {
+                if k == gdk::Key::Escape
+                    && let Some(e) = weak.upgrade()
+                {
+                    e.end_selection();
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            });
+            window.add_controller(key);
+            let weak = Rc::downgrade(self);
+            window.connect_close_request(move |_| {
+                if let Some(e) = weak.upgrade() {
+                    e.end_selection();
+                }
+                glib::Propagation::Stop
+            });
+            window.fullscreen_on_monitor(monitor);
+            overlays.push(window);
+        }
+        for window in &overlays {
+            window.present();
+        }
+        self.overlays.replace(overlays);
+        true
+    }
+    fn extend_overlay(&self, g: &gtk::GestureDrag, dx: f64, dy: f64) {
+        let (Some((x, y)), Some(area)) = (g.start_point(), g.widget()) else {
+            return;
+        };
+        let p = (
+            (x + dx).clamp(0., area.width() as f64),
+            (y + dy).clamp(0., area.height() as f64),
+        );
+        let mut drag = self.drag.borrow_mut();
+        if !drag.is_empty() && drag.last() != Some(&p) {
+            drag.push(p);
+            area.queue_draw();
+        }
+    }
+    fn close_overlays(&self) {
+        let overlays = self.overlays.take();
+        self.drag.borrow_mut().clear();
         self.frozen.take();
-        self.cancel_drag();
-        self.window.unfullscreen();
+        for window in overlays {
+            window.destroy();
+        }
+    }
+    fn end_selection(&self) {
+        self.close_overlays();
         self.set_busy(false);
         self.note("", "");
+        self.window.present();
+    }
+    /// Crops the frozen capture to a selection drawn on one monitor overlay.
+    fn finish_selection(&self, points: &[Point], offset: Point, freehand: bool) {
+        let result = self.frozen.borrow().as_ref().map(|(doc, scale)| {
+            let points: Vec<Point> = points
+                .iter()
+                .map(|&(x, y)| ((x + offset.0) * scale, (y + offset.1) * scale))
+                .collect();
+            doc.selection(&points, freehand)
+        });
+        self.end_selection();
+        match result {
+            Some(Ok(Some(doc))) => self.accept(doc),
+            Some(Err(err)) => {
+                self.error("Gagal memotong gambar.", "Could not crop the image.", err)
+            }
+            _ => (),
+        }
     }
     fn accept(&self, doc: Document) {
         self.selected.set(None);
@@ -723,11 +891,7 @@ impl Editor {
         self.refresh();
     }
     fn with_canvas<T>(&self, f: impl FnOnce(&Document) -> T) -> Option<T> {
-        if let Some((doc, _)) = self.frozen.borrow().as_ref() {
-            Some(f(doc))
-        } else {
-            self.doc.borrow().as_ref().map(f)
-        }
+        self.doc.borrow().as_ref().map(f)
     }
     fn position(&self, x: f64, y: f64, clamp: bool) -> Option<Point> {
         self.with_canvas(|doc| {
@@ -779,12 +943,6 @@ impl Editor {
         self.selected.set(doc.hit(p, 3. / scale));
     }
     fn draw(&self, c: &Context, w: i32, h: i32) -> Result<(), gtk::cairo::Error> {
-        let selecting = self.selecting();
-        let freehand = self
-            .frozen
-            .borrow()
-            .as_ref()
-            .is_some_and(|(_, freehand)| *freehand);
         self.with_canvas(|doc| {
             c.set_source_rgb(0.14, 0.15, 0.16);
             c.paint()?;
@@ -795,7 +953,7 @@ impl Editor {
             let selected = self
                 .selected
                 .get()
-                .filter(|_| !selecting && self.tool.get() == Tool::Select);
+                .filter(|_| self.tool.get() == Tool::Select);
             doc.paint_preview(c, selected.map(|id| (id, transform)))?;
             if let Some(corners) = selected.and_then(|id| doc.corners(id)) {
                 let h = Self::handles(corners.map(|p| transform.point(p)), &view);
@@ -815,31 +973,41 @@ impl Editor {
                     c.stroke()?;
                 }
             }
-            if selecting || self.tool.get() == Tool::Crop && !points.is_empty() {
+            if self.tool.get() == Tool::Crop && !points.is_empty() {
                 let r = doc.rect();
                 c.rectangle(r.x, r.y, r.w, r.h);
-                let outline = || {
-                    if freehand {
-                        document::path(c, &points);
-                        c.close_path();
-                    } else if let (Some(a), Some(b)) = (points.first(), points.last()) {
-                        c.rectangle(a.0, a.1, b.0 - a.0, b.1 - a.1);
-                    }
-                };
-                outline();
-                c.set_fill_rule(FillRule::EvenOdd);
-                c.set_source_rgba(0., 0., 0., 0.48);
-                c.fill()?;
-                outline();
-                c.set_source_rgb(1., 1., 1.);
-                c.set_line_width(1.5 / view.scale);
-                c.stroke()?;
+                Self::shade_outside(c, &points, false, 0.48, 1.5 / view.scale)?;
             } else if !points.is_empty() && matches!(self.tool.get(), Tool::Pen | Tool::Highlight) {
                 document::stroke(c, self.tool.get(), &points)?;
             }
             Ok(())
         })
         .unwrap_or(Ok(()))
+    }
+    /// Dims the current path outside the selection and strokes its outline.
+    fn shade_outside(
+        c: &Context,
+        points: &[Point],
+        freehand: bool,
+        alpha: f64,
+        line_width: f64,
+    ) -> Result<(), gtk::cairo::Error> {
+        let outline = || {
+            if freehand {
+                document::path(c, points);
+                c.close_path();
+            } else if let (Some(a), Some(b)) = (points.first(), points.last()) {
+                c.rectangle(a.0, a.1, b.0 - a.0, b.1 - a.1);
+            }
+        };
+        outline();
+        c.set_fill_rule(FillRule::EvenOdd);
+        c.set_source_rgba(0., 0., 0., alpha);
+        c.fill()?;
+        outline();
+        c.set_source_rgb(1., 1., 1.);
+        c.set_line_width(line_width);
+        c.stroke()
     }
     fn attach_canvas(self: &Rc<Self>) {
         let weak = Rc::downgrade(self);
@@ -858,17 +1026,17 @@ impl Editor {
         let weak = Rc::downgrade(self);
         g.connect_drag_begin(move |_, x, y| {
             if let Some(e) = weak.upgrade()
-                && (!e.busy.get() || e.selecting())
+                && !e.busy.get()
             {
                 let Some(p) = e.position(x, y, false) else {
-                    if !e.selecting() && e.tool.get() == Tool::Select {
+                    if e.tool.get() == Tool::Select {
                         e.selected.set(None);
                         e.cancel_drag();
                         e.refresh();
                     }
                     return;
                 };
-                if !e.selecting() && e.tool.get() == Tool::Select {
+                if e.tool.get() == Tool::Select {
                     e.pick(p);
                     e.refresh();
                 }
@@ -895,21 +1063,7 @@ impl Editor {
                 if points.is_empty() {
                     return;
                 }
-                if e.selecting() {
-                    let result = {
-                        let frozen = e.frozen.borrow();
-                        let (doc, freehand) = frozen.as_ref().unwrap();
-                        doc.selection(&points, *freehand)
-                    };
-                    e.end_selection();
-                    match result {
-                        Ok(Some(doc)) => e.accept(doc),
-                        Ok(None) => (),
-                        Err(err) => {
-                            e.error("Gagal memotong gambar.", "Could not crop the image.", err)
-                        }
-                    }
-                } else if let Some(doc) = e.doc.borrow_mut().as_mut() {
+                if let Some(doc) = e.doc.borrow_mut().as_mut() {
                     if e.tool.get() == Tool::Select {
                         if let Some(id) = e.selected.get() {
                             doc.transform(id, e.transform(&points))
@@ -935,13 +1089,9 @@ impl Editor {
             if k == gdk::Key::Escape
                 && let Some(e) = weak.upgrade()
             {
-                if e.selecting() {
-                    e.end_selection();
-                } else {
-                    e.selected.set(None);
-                    e.cancel_drag();
-                    e.refresh();
-                }
+                e.selected.set(None);
+                e.cancel_drag();
+                e.refresh();
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
@@ -994,7 +1144,7 @@ fn main() -> glib::ExitCode {
             e.clone().start(true);
         } else if options.contains("capture") {
             e.clone().start(false);
-        } else if !e.busy.get() || e.selecting() {
+        } else if !e.busy.get() {
             e.window.present();
         }
         glib::ExitCode::SUCCESS

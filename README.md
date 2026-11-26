@@ -21,8 +21,8 @@ Gunakan `cargo run --locked -- --capture` untuk langsung mengambil tangkapan lay
 
 ## Penggunaan
 
-1. Pilih mode **Persegi panjang**, **Bentuk bebas**, **Jendela**, atau **Layar penuh**. Pilih jeda tanpa hitung mundur, 3 detik, 5 detik, atau 10 detik.
-2. Klik **Baru**. Untuk mode area, seret untuk memilih persegi panjang atau gambar batas bentuk bebas. Tekan `Esc` untuk membatalkan pemilihan area. Untuk mode jendela, ikuti dialog tangkapan layar GNOME.
+1. Pilih mode **Persegi panjang**, **Bentuk bebas**, atau **Layar penuh**. Pilih jeda tanpa hitung mundur, 3 detik, 5 detik, atau 10 detik.
+2. Klik **Baru**. Untuk mode area, seret untuk memilih persegi panjang atau gambar batas bentuk bebas. Pemilihan bisa dilakukan di monitor mana pun. Tekan `Esc` untuk membatalkan pemilihan area.
 3. Gunakan **Pena**, **Stabilo**, **Penghapus**, dan **Potong** untuk mengedit gambar. Alat **Pilih** dapat memindahkan atau mengubah ukuran coretan yang dipilih.
 4. Hasil tangkapan disalin otomatis saat jendela editor mendapat fokus. Klik **Salin** untuk menyalin hasil edit terbaru atau **Simpan** untuk menyimpannya sebagai PNG.
 
@@ -35,7 +35,7 @@ Gunakan `cargo run --locked -- --capture` untuk langsung mengambil tangkapan lay
 | `Ctrl+Shift+Z` | Ulangi perubahan |
 | `Delete` | Hapus coretan yang dipilih |
 
-Di **Pengaturan**, pilih bahasa Indonesia atau Inggris dan tema sistem, terang, atau gelap. Opsi **Gunakan Print Screen** mengalihkan tombol `Print Screen` GNOME ke mode persegi panjang Easy SS. Matikan opsi ini sebelum menghapus aplikasi agar Easy SS dapat memulihkan pintasan GNOME sebelumnya.
+Di **Pengaturan**, pilih bahasa Indonesia atau Inggris dan tema sistem, terang, atau gelap. Opsi **Simpan tangkapan** menentukan lokasi berkas hasil tangkapan: **Sementara (/tmp)** (bawaan, terhapus saat komputer dimulai ulang) atau **Gambar/Screenshots** (permanen). Opsi **Gunakan Print Screen** mengalihkan tombol `Print Screen` GNOME ke mode persegi panjang Easy SS. Matikan opsi ini sebelum menghapus aplikasi agar Easy SS dapat memulihkan pintasan GNOME sebelumnya.
 
 ## Membuat dan memasang RPM
 
