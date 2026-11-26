@@ -11,8 +11,7 @@
 | Lokasi | Tanggung jawab |
 | --- | --- |
 | `src/main.rs` | Aplikasi GTK, tindakan editor, gestur kanvas, clipboard, dialog simpan, dan opsi CLI |
-| `src/capture.rs` | Permintaan ke XDG Desktop Portal, penanganan izin GNOME, pemuatan gambar hasil tangkapan, dan folder penyimpanan |
-| `src/record.rs` | Sesi portal ScreenCast dan perekaman video WebM melalui `gst-launch-1.0` |
+| `src/capture.rs` | Permintaan ke XDG Desktop Portal, penanganan izin GNOME, dan pemuatan gambar hasil tangkapan |
 | `src/document.rs` | Geometri, rendering Cairo, anotasi, crop, riwayat edit, dan tes unit |
 | `src/settings.rs` | Preferensi bahasa dan tema, penyimpanan `easy-ss/settings.ini`, serta label UI |
 | `src/print_screen.rs` | Pendaftaran pintasan `Print Screen` GNOME dan pemulihan pintasan sebelumnya |
