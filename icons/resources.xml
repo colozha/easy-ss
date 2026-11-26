@@ -1,0 +1,8 @@
+<gresources>
+  <gresource prefix="/io/github/easyss/icons/scalable/actions">
+    <file>select-symbolic.svg</file>
+    <file>marker-symbolic.svg</file>
+    <file>eraser-symbolic.svg</file>
+    <file>crop-symbolic.svg</file>
+  </gresource>
+</gresources>

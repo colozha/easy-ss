@@ -1,0 +1,8 @@
+[package]
+name = "easy-ss"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.10", features = ["v4_10"] }
+ashpd = { version = "0.12", default-features = false, features = ["async-std", "gtk4"] }

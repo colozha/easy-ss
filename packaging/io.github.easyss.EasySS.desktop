@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Easy SS
+Comment=Take and annotate screenshots
+Comment[id]=Ambil dan beri anotasi pada tangkapan layar
+Exec=easy-ss
+Icon=camera-photo-symbolic
+Terminal=false
+Categories=Graphics;Photography;
